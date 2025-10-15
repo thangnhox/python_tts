@@ -67,6 +67,7 @@
     let stopRequested = false;
     let currentAudio = null;
     let voices = [];
+	let nextPromise = null; // stores pre-generated next segment
 
     // ------------------------------
     // Initialization
@@ -120,56 +121,86 @@ async function speakBlock(btn) {
 
   stopRequested = false;
   const segments = parseSegments(rawText, currentVoice);
+  const firstIsVoice = segments.length && segments[0].type === "voice";
+  if (firstIsVoice) output("🎙️ Script-specified voice overrides selected voice.");
 
-  for (const seg of segments) {
-    if (stopRequested) break;
-
-    if (seg.type === "voice") {
-      // switch current voice for subsequent text
-      currentVoice = seg.name;
-      output("🎙️ Voice change → " + currentVoice);
-      continue;
-    }
-
+  // Helper: generate one segment -> Audio object
+  async function generateAudio(seg, voice) {
     if (seg.type === "pause") {
-      output("⏸️ Pause " + seg.duration + "s");
       await new Promise(r => setTimeout(r, seg.duration * 1000));
-      continue;
+      return null;
     }
-
+    if (seg.type === "voice") {
+      return { type: "voice", name: seg.name };
+    }
     if (seg.type === "text") {
       const text = seg.content.trim();
-      if (!text) continue; // safety: skip empty
-      output("🔊 Generating audio for " + currentVoice + " ...");
-
-      // request server TTS for this text + voice
+      if (!text) return null;
       const res = await fetch("/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, voice: currentVoice })
+        body: JSON.stringify({ text, voice })
       });
-
-      if (!res.ok) {
-        output("❌ TTS request failed for " + currentVoice);
-        continue;
-      }
-
+      if (!res.ok) return null;
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      currentAudio = audio;
+      return { type: "audio", audio, voice };
+    }
+    return null;
+  }
 
-      // play and wait to finish
-      await new Promise(resolve => {
-        audio.onended = () => { currentAudio = null; resolve(); };
-        audio.onerror = () => { currentAudio = null; resolve(); };
-        audio.play();
-        output("🔊 Speaking (" + currentVoice + ")");
+  let i = 0;
+  let nextPromise = null;
+
+  // Pre-generate the first playable
+  while (i < segments.length && (!nextPromise || (await nextPromise) === null)) {
+    nextPromise = generateAudio(segments[i++], currentVoice);
+  }
+
+  while (true) {
+    if (stopRequested) break;
+    if (!nextPromise) break; // ✅ nothing more to play
+
+    const current = await nextPromise;
+    nextPromise = null; // ✅ release previous promise immediately
+
+    if (!current) {
+      if (i >= segments.length) break;
+      nextPromise = generateAudio(segments[i++], currentVoice);
+      continue;
+    }
+
+    // Handle voice change
+    if (current.type === "voice") {
+      currentVoice = current.name;
+      output("🎙️ Voice change → " + currentVoice);
+      if (i < segments.length)
+        nextPromise = generateAudio(segments[i++], currentVoice);
+      continue;
+    }
+
+    // Handle audio playback
+    if (current.type === "audio") {
+      output("🔊 Speaking (" + current.voice + ")");
+      const playPromise = new Promise(resolve => {
+        current.audio.onended = () => resolve();
+        current.audio.onerror = () => resolve();
+        current.audio.play();
       });
+
+      // Pre-generate next segment while current plays
+      if (i < segments.length)
+        nextPromise = generateAudio(segments[i++], currentVoice);
+      else
+        nextPromise = null; // ✅ clear when no next
+
+      await playPromise;
+      continue;
     }
   }
 
-  currentAudio = null;
+  nextPromise = null; // ✅ ensure all references dropped
   output(stopRequested ? "⏹️ Stopped." : "✅ Finished block.");
 }
 
