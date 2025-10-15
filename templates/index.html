@@ -1,169 +1,177 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>TTS Multi-Voice Studio</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 1em auto;
-      max-width: 900px;
-      line-height: 1.5;
-      background: #fafafa;
-      color: #333;
-    }
-    textarea {
-      width: 100%;
-      height: 80px;
-      padding: 8px;
-      margin-top: 5px;
-      font-size: 15px;
-      border-radius: 5px;
-      border: 1px solid #ccc;
-    }
-    select, button {
-      padding: 6px 10px;
-      margin: 3px;
-      font-size: 14px;
-    }
-    .block {
-      background: #fff;
-      border: 1px solid #ccc;
-      border-radius: 8px;
-      padding: 10px;
-      margin-bottom: 10px;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.1);
-    }
-    #output {
-      margin-top: 1em;
-      font-weight: bold;
-      font-family: monospace;
-    }
-    progress {
-      width: 100%;
-      height: 20px;
-    }
-  </style>
+<meta charset="UTF-8">
+<title>Multi-Voice Text-to-Speech</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 1.5em; background: #f5f5f5; color: #222; }
+  .block { background: white; border-radius: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.1); padding: 1em; margin-bottom: 1em; }
+  textarea { width: 100%; min-height: 80px; padding: .5em; font-size: 15px; border: 1px solid #ccc; border-radius: 6px; }
+  button { margin: .3em; padding: .5em 1em; border-radius: 6px; border: none; background: #0078d7; color: white; cursor: pointer; }
+  button:hover { background: #005fa3; }
+  select { padding: .3em; font-size: 14px; border-radius: 6px; }
+  #output { margin-top: 1em; padding: 1em; background: #fff; border-radius: 8px; font-family: monospace; white-space: pre-wrap; }
+  #progressBar { width: 100%; height: 14px; display:none; margin-top:.5em; }
+</style>
 </head>
 <body>
+  <h1>🎙️ Multi-Voice Text-to-Speech</h1>
+  <div id="container"></div>
 
-  <h1>🎙️ Multi-Voice Text-to-Speech Studio</h1>
-  <p>Type text and use <code>[voice name]:</code> and <code>[pause n]</code> tags for advanced scripting.</p>
-
-  <div>
+  <div style="margin-top:1em;">
     <button onclick="addBlock()">➕ Add Block</button>
-    <button onclick="speakAll()">🔊 Speak All</button>
+    <button onclick="speakAll()">▶️ Speak All</button>
     <button onclick="stopAll()">⏹️ Stop</button>
-    <button onclick="exportScript()">💾 Export Script</button>
     <button onclick="exportAllMp3()">🎧 Export All to MP3</button>
   </div>
 
-  <div id="blocks"></div>
+  <div id="output">Ready.</div>
+  <progress id="progressBar" value="0" max="100"></progress>
 
-  <div id="output"></div>
-  <progress id="progressBar" value="0" max="100" style="display:none;"></progress>
+<script>
+let voices = {};
+let stopRequested = false;
+let activeAudios = [];
 
-  <script>
-    let stopRequested = false;
-    let currentAudio = null;
-    let voices = [];
-	let nextPromise = null; // stores pre-generated next segment
+// Output helper
+function output(msg) {
+  const el = document.getElementById("output");
+  el.textContent = msg;
+  console.log(msg);
+}
 
-    // ------------------------------
-    // Initialization
-    // ------------------------------
-    async function loadVoices() {
-      try {
-        const res = await fetch("/voices");
-        voices = await res.json();
-      } catch (err) {
-        console.error("Voice list failed:", err);
-        voices = ["en-US-AriaNeural", "en-US-GuyNeural"];
-      }
+// Load voices from server
+async function loadVoices() {
+  try {
+    const res = await fetch("/voices");
+    const data = await res.json();
+    const grouped = {};
+    for (const v of data) {
+      const prefix = v.split("-")[0];
+      grouped[prefix] ||= [];
+      grouped[prefix].push(v);
     }
+    voices = grouped;
+  } catch (e) {
+    console.error("Failed to load voices:", e);
+    voices = { en: ["en-US-AriaNeural","en-US-GuyNeural"] };
+  }
+}
 
-    window.addEventListener("DOMContentLoaded", async () => {
-      await loadVoices();
-      addBlock(); // start with one
-    });
+// ✅ Initialize safely after DOM is ready
+async function init() {
+  await loadVoices();
+  addBlock();
+  output("✅ Voices loaded. Ready.");
+}
+window.addEventListener("DOMContentLoaded", init);
 
-    // ------------------------------
-    // Block management
-    // ------------------------------
-    function addBlock(text = "", voice = voices[0] || "en-US-AriaNeural") {
-      const div = document.createElement("div");
-      div.className = "block";
-      div.innerHTML = `
-        <label>Voice:</label>
-        <select>${voices.map(v => `<option value="${v}" ${v===voice?"selected":""}>${v}</option>`).join("")}</select>
-        <br>
-        <textarea placeholder="Enter text...">${text}</textarea><br>
-        <button onclick="speakBlock(this)">Speak</button>
-        <button onclick="downloadBlockMp3(this)">🎧 To MP3</button>
-        <button onclick="removeBlock(this)">❌ Remove</button>
-      `;
-      document.getElementById("blocks").appendChild(div);
+// Add a new block
+function addBlock(text = "", voice = "en-US-AriaNeural") {
+  const div = document.createElement("div");
+  div.className = "block";
+  div.innerHTML = `
+    <label>Lang:</label>
+    <select class="langSelect"></select>
+    <label>Voice:</label>
+    <select class="voiceSelect"></select>
+    <button class="speakBtn" onclick="speakBlock(this)">▶️ Speak</button>
+    <button onclick="exportBlock(this)">💾 To MP3</button>
+    <textarea placeholder="Enter text...">${text}</textarea>
+  `;
+  document.getElementById("container").appendChild(div);
+  fillLangDropdown(div.querySelector(".langSelect"), div.querySelector(".voiceSelect"), voice);
+}
+
+// Fill dropdowns
+function fillLangDropdown(langSelect, voiceSelect, selectedVoice) {
+  langSelect.innerHTML = "";
+  for (const lang of Object.keys(voices).sort()) {
+    const opt = document.createElement("option");
+    opt.value = lang;
+    opt.textContent = lang;
+    langSelect.appendChild(opt);
+  }
+  langSelect.value = selectedVoice.split("-")[0] || Object.keys(voices)[0];
+  fillVoiceDropdown(langSelect, voiceSelect, selectedVoice);
+  langSelect.addEventListener("change", () => fillVoiceDropdown(langSelect, voiceSelect));
+}
+
+function fillVoiceDropdown(langSelect, voiceSelect, selectedVoice) {
+  const lang = langSelect.value;
+  const list = voices[lang] || [];
+  voiceSelect.innerHTML = "";
+  for (const v of list) {
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = v;
+    voiceSelect.appendChild(opt);
+  }
+  if (selectedVoice) voiceSelect.value = selectedVoice;
+}
+
+// Parse tags like [voice id]: or [pause n]
+function parseSegments(text, defaultVoice) {
+  const regex = /\[voice\s+([^\]]+)\]\s*:\s*([^\[]*)|\[pause\s*(\d+(?:\.\d+)?)\s*(?:s|sec|seconds)?\]/gi;
+  const segments = [];
+  let last = 0, match;
+  while ((match = regex.exec(text))) {
+    if (match.index > last) {
+      const between = text.slice(last, match.index).trim();
+      if (between) segments.push({ type: "text", content: between });
     }
-
-    function removeBlock(btn) {
-      btn.parentElement.remove();
+    if (match[1]) {
+      segments.push({ type: "voice", name: match[1].trim() });
+      const inlineText = (match[2] || "").trim();
+      if (inlineText) segments.push({ type: "text", content: inlineText });
+    } else if (match[3]) {
+      segments.push({ type: "pause", duration: parseFloat(match[3]) });
     }
+    last = regex.lastIndex;
+  }
+  const tail = text.slice(last).trim();
+  if (tail) segments.push({ type: "text", content: tail });
+  return segments;
+}
 
-    // ------------------------------
-    // Speaking logic
-    // ------------------------------
+// ----------------------------------------------
+// Core speaking logic shared by both functions
+// ----------------------------------------------
+async function speakSegments(segments, initialVoice) {
+  let currentVoice = initialVoice;
+  let nextPromise = null;
+  let i = 0;
 
-async function speakBlock(btn) {
-  const block = btn.parentElement;
-  const rawText = block.querySelector("textarea").value || "";
-  let currentVoice = block.querySelector("select").value;
-  if (!rawText.trim()) return alert("Please enter text.");
-
-  stopRequested = false;
-  const segments = parseSegments(rawText, currentVoice);
-  const firstIsVoice = segments.length && segments[0].type === "voice";
-  if (firstIsVoice) output("🎙️ Script-specified voice overrides selected voice.");
-
-  // Helper: generate one segment -> Audio object
   async function generateAudio(seg, voice) {
     if (seg.type === "pause") {
       await new Promise(r => setTimeout(r, seg.duration * 1000));
       return null;
     }
-    if (seg.type === "voice") {
-      return { type: "voice", name: seg.name };
-    }
+    if (seg.type === "voice") return { type: "voice", name: seg.name };
     if (seg.type === "text") {
       const text = seg.content.trim();
       if (!text) return null;
       const res = await fetch("/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, voice })
       });
       if (!res.ok) return null;
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      return { type: "audio", audio, voice };
+      return { type: "audio", audio, voice, url };
     }
     return null;
   }
 
-  let i = 0;
-  let nextPromise = null;
-
-  // Pre-generate the first playable
-  while (i < segments.length && (!nextPromise || (await nextPromise) === null)) {
+  while (i < segments.length && (!nextPromise || (await nextPromise) === null))
     nextPromise = generateAudio(segments[i++], currentVoice);
-  }
 
   while (true) {
     if (stopRequested) break;
-    if (!nextPromise) break; // ✅ nothing more to play
-
+    if (!nextPromise) break;
     const current = await nextPromise;
-    nextPromise = null; // ✅ release previous promise immediately
+    nextPromise = null;
 
     if (!current) {
       if (i >= segments.length) break;
@@ -171,7 +179,6 @@ async function speakBlock(btn) {
       continue;
     }
 
-    // Handle voice change
     if (current.type === "voice") {
       currentVoice = current.name;
       output("🎙️ Voice change → " + currentVoice);
@@ -180,195 +187,147 @@ async function speakBlock(btn) {
       continue;
     }
 
-    // Handle audio playback
     if (current.type === "audio") {
       output("🔊 Speaking (" + current.voice + ")");
+      const url = current.url;
+      activeAudios.push(current.audio);
       const playPromise = new Promise(resolve => {
-        current.audio.onended = () => resolve();
-        current.audio.onerror = () => resolve();
+        current.audio.onended = () => {
+          try { URL.revokeObjectURL(url); } catch {}
+          activeAudios = activeAudios.filter(a => a !== current.audio);
+          resolve();
+        };
+        current.audio.onerror = () => {
+          try { URL.revokeObjectURL(url); } catch {}
+          activeAudios = activeAudios.filter(a => a !== current.audio);
+          resolve();
+        };
         current.audio.play();
       });
-
-      // Pre-generate next segment while current plays
-      if (i < segments.length)
-        nextPromise = generateAudio(segments[i++], currentVoice);
-      else
-        nextPromise = null; // ✅ clear when no next
-
+      if (i < segments.length) nextPromise = generateAudio(segments[i++], currentVoice);
+      else nextPromise = null;
       await playPromise;
-      continue;
     }
   }
+  nextPromise = null;
+}
 
-  nextPromise = null; // ✅ ensure all references dropped
+// ----------------------------------------------
+// ▶️ Speak single block
+// ----------------------------------------------
+async function speakBlock(btn) {
+  const block = btn.parentElement;
+  const text = block.querySelector("textarea").value.trim();
+  if (!text) return alert("Please enter text.");
+  stopRequested = false;
+  const voice = block.querySelector(".voiceSelect").value;
+  const segments = parseSegments(text, voice);
+  await speakSegments(segments, voice);
   output(stopRequested ? "⏹️ Stopped." : "✅ Finished block.");
 }
 
+// ----------------------------------------------
+// ▶️ Speak all blocks sequentially with voice tags
+// ----------------------------------------------
+async function speakAll() {
+  const blocks = [...document.querySelectorAll(".block")];
+  if (!blocks.length) return alert("No blocks to speak.");
+  stopRequested = false;
+  output("🎬 Starting multi-block playback...");
 
-    function stopAll() {
-      stopRequested = true;
-      if (currentAudio) {
-        currentAudio.pause();
-        currentAudio.currentTime = 0;
-        currentAudio = null;
-      }
-      output("⏹️ Stopped all.");
-    }
-
-    async function speakAll() {
-      const blocks = [...document.querySelectorAll(".block")];
-      for (const b of blocks) {
-        if (stopRequested) break;
-        const btn = b.querySelector("button");
-        await speakBlock(btn);
-      }
-      output("✅ All done.");
-    }
-
-    // ------------------------------
-    // MP3 Export (single + all)
-    // ------------------------------
-    async function downloadBlockMp3(btn) {
-      const block = btn.parentElement;
-      const text = block.querySelector("textarea").value.trim();
-      const voice = block.querySelector("select").value;
-      if (!text) return alert("Please enter text.");
-      output("🎧 Generating MP3 for " + voice + "...");
-      const res = await fetch("/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, voice })
-      });
-      const blob = await res.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `${voice}.mp3`;
-      a.click();
-      output("💾 Downloaded " + voice + ".mp3");
-    }
-
-    async function exportAllMp3() {
-      const blocksData = [...document.querySelectorAll(".block")].map(b => ({
-        text: b.querySelector("textarea").value.trim(),
-        voice: b.querySelector("select").value
-      }));
-
-      output("🎧 Generating combined MP3...");
-      document.getElementById("progressBar").style.display = "block";
-
-      const res = await fetch("/tts-all", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ blocks: blocksData })
-      });
-      const data = await res.json();
-      if (!data.job_id) {
-        alert("Failed to start export.");
-        return;
-      }
-
-      const jobId = data.job_id;
-      let done = false;
-      while (!done) {
-        const p = await fetch(`/progress/${jobId}`).then(r => r.json());
-        document.getElementById("progressBar").value = p.progress;
-        output(`${p.progress}% - ${p.status}`);
-        if (p.status === "Complete") done = true;
-        await wait(2000);
-      }
-
-      window.location.href = data.download;
-      output("✅ Combined MP3 downloaded.");
-      document.getElementById("progressBar").style.display = "none";
-    }
-
-    // ------------------------------
-    // Script Export
-    // ------------------------------
-    function exportScript() {
-      const blocks = [...document.querySelectorAll(".block")];
-      let script = "";
-      for (const b of blocks) {
-        const text = b.querySelector("textarea").value.trim();
-        const voice = b.querySelector("select").value;
-        if (!text) continue;
-        const hasVoiceTag = /^\[voice\s+[^\]]+\]/i.test(text);
-        if (hasVoiceTag) script += text + "\n\n";
-        else script += `[voice ${voice}]: ${text}\n\n`;
-      }
-      if (!script.trim()) return alert("Nothing to export.");
-      const blob = new Blob([script.trim()], { type: "text/plain" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = "tts_script.txt";
-      a.click();
-      output("💾 Script exported.");
-    }
-
-    // ------------------------------
-    // Helpers
-    // ------------------------------
-
-function parseSegments(text, defaultVoice) {
-  // This regex matches either:
-  //  - [voice NAME]: followed by any text up until next [voice or [pause or end
-  //  - OR a [pause N] tag
-  // The voice match captures inline text after the colon, if present.
-  const regex = /\[voice\s+([^\]]+)\]\s*:\s*([^\[]*)|\[pause\s*(\d+(?:\.\d+)?)\s*(?:s|sec|seconds)?\]/gi;
-  const segments = [];
-  let lastIndex = 0;
-  let m;
-
-  while ((m = regex.exec(text)) !== null) {
-    // text between lastIndex and this match => belongs to previous context
-    if (m.index > lastIndex) {
-      const between = text.slice(lastIndex, m.index).trim();
-      if (between) segments.push({ type: "text", content: between });
-    }
-
-    if (m[1]) {
-      // [voice NAME]: possibly followed by inline text in m[2]
-      const voiceName = m[1].trim();
-      const inline = (m[2] || "").trim();
-      // emit a voice change
-      segments.push({ type: "voice", name: voiceName });
-      // if inline text exists after the colon, emit it as a text segment immediately for that voice
-      if (inline) segments.push({ type: "text", content: inline });
-    } else if (m[3]) {
-      // [pause N]
-      const dur = parseFloat(m[3]);
-      segments.push({ type: "pause", duration: dur });
-    }
-
-    lastIndex = regex.lastIndex;
+  for (let i = 0; i < blocks.length; i++) {
+    if (stopRequested) break;
+    const block = blocks[i];
+    const text = block.querySelector("textarea").value.trim();
+    if (!text) continue;
+    const voice = block.querySelector(".voiceSelect").value;
+    const segments = parseSegments(text, voice);
+    output(`🎧 Block ${i + 1}/${blocks.length}`);
+    await speakSegments(segments, voice);
   }
 
-  // trailing text after last match
-  if (lastIndex < text.length) {
-    const tail = text.slice(lastIndex).trim();
-    if (tail) segments.push({ type: "text", content: tail });
-  }
-
-  // remove any accidental empty text segments
-  return segments.filter(s => !(s.type === "text" && (!s.content || s.content.trim() === "")));
+  output(stopRequested ? "⏹️ Stopped." : "✅ Finished all blocks.");
 }
 
+// ----------------------------------------------
+// 💾 Export single block
+// ----------------------------------------------
+async function exportBlock(btn) {
+  const block = btn.parentElement;
+  const text = block.querySelector("textarea").value.trim();
+  const voice = block.querySelector(".voiceSelect").value;
+  if (!text) return alert("No text.");
+  output(`🎧 Generating MP3 for ${voice}...`);
+  const res = await fetch("/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, voice })
+  });
+  if (!res.ok) return alert("Error generating audio.");
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${voice}.mp3`;
+  a.click();
+  try { URL.revokeObjectURL(a.href); } catch {}
+  output(`💾 Downloaded ${voice}.mp3`);
+}
 
-    function output(msg) {
-      document.getElementById("output").textContent = msg;
-    }
+// ----------------------------------------------
+// 🎧 Export all blocks to MP3
+// ----------------------------------------------
+async function exportAllMp3() {
+  const blocks = [...document.querySelectorAll(".block")].map(b => ({
+    text: b.querySelector("textarea").value.trim(),
+    voice: b.querySelector(".voiceSelect").value
+  })).filter(b => b.text);
+  if (!blocks.length) return alert("No blocks to export.");
 
-    function wait(ms) {
-      return new Promise(r => setTimeout(r, ms));
-    }
+  output("🔁 Starting combined MP3 export...");
+  const bar = document.getElementById("progressBar");
+  bar.style.display = "block";
+  bar.value = 0;
 
-    function playAudio(audio) {
-      return new Promise(resolve => {
-        audio.onended = () => { currentAudio = null; resolve(); };
-        audio.onerror = () => resolve();
-        audio.play();
-      });
-    }
-  </script>
+  const startRes = await fetch("/tts-all", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ blocks })
+  });
+  if (!startRes.ok) { bar.style.display = "none"; return alert("Failed to start export."); }
+  const startData = await startRes.json();
+  const jobId = startData.job_id;
+  const downloadPath = startData.download;
+
+  let done = false;
+  while (!done) {
+    await new Promise(r => setTimeout(r, 1500));
+    try {
+      const p = await fetch(`/progress/${jobId}`).then(r => r.json());
+      if (p.error) { output("Export error"); break; }
+      output(`${p.progress}% — ${p.status}`);
+      bar.value = p.progress;
+      if (p.status === "Complete" || p.progress >= 100) done = true;
+    } catch (err) { console.error("progress poll error:", err); break; }
+  }
+
+  if (done) {
+    window.location.href = downloadPath;
+    output("✅ Combined MP3 download started.");
+  } else output("⚠️ Export did not complete successfully.");
+  bar.style.display = "none";
+}
+
+// ----------------------------------------------
+// ⏹️ Stop everything immediately
+// ----------------------------------------------
+function stopAll() {
+  stopRequested = true;
+  activeAudios.forEach(a => { try { a.pause(); a.currentTime = 0; } catch {} });
+  activeAudios = [];
+  output("⏹️ Force stopped all audio.");
+}
+</script>
+
+
 </body>
 </html>
