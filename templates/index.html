@@ -32,6 +32,7 @@
 let voices = {};
 let stopRequested = false;
 let activeAudios = [];
+let activeControllers = []; // 👈 New: for fetch abortion
 
 // Output helper
 function output(msg) {
@@ -54,7 +55,7 @@ async function loadVoices() {
     voices = grouped;
   } catch (e) {
     console.error("Failed to load voices:", e);
-    voices = { en: ["en-US-AriaNeural","en-US-GuyNeural"] };
+    voices = { en: ["en-US-AriaNeural", "en-US-GuyNeural"] };
   }
 }
 
@@ -112,9 +113,11 @@ function fillVoiceDropdown(langSelect, voiceSelect, selectedVoice) {
 
 // Parse tags like [voice id]: or [pause n]
 function parseSegments(text, defaultVoice) {
-  const regex = /\[voice\s+([^\]]+)\]\s*:\s*([^\[]*)|\[pause\s*(\d+(?:\.\d+)?)\s*(?:s|sec|seconds)?\]/gi;
+  const regex =
+    /\[voice\s+([^\]]+)\]\s*:\s*([^\[]*)|\[pause\s*(\d+(?:\.\d+)?)\s*(?:s|sec|seconds)?\]/gi;
   const segments = [];
-  let last = 0, match;
+  let last = 0,
+    match;
   while ((match = regex.exec(text))) {
     if (match.index > last) {
       const between = text.slice(last, match.index).trim();
@@ -143,6 +146,7 @@ async function speakSegments(segments, initialVoice) {
   let i = 0;
 
   async function generateAudio(seg, voice) {
+    if (stopRequested) return null;
     if (seg.type === "pause") {
       await new Promise(r => setTimeout(r, seg.duration * 1000));
       return null;
@@ -151,15 +155,33 @@ async function speakSegments(segments, initialVoice) {
     if (seg.type === "text") {
       const text = seg.content.trim();
       if (!text) return null;
-      const res = await fetch("/tts", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text, voice })
-      });
-      if (!res.ok) return null;
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      return { type: "audio", audio, voice, url };
+
+      // 👇 Create abortable fetch
+      const controller = new AbortController();
+      activeControllers.push(controller);
+
+      try {
+        const res = await fetch("/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, voice }),
+          signal: controller.signal
+        });
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        return { type: "audio", audio, voice, url };
+      } catch (err) {
+        if (err.name === "AbortError") {
+          console.log("⏹️ Fetch aborted:", text);
+          return null;
+        }
+        console.error("Fetch failed:", err);
+        return null;
+      } finally {
+        activeControllers = activeControllers.filter(c => c !== controller);
+      }
     }
     return null;
   }
@@ -204,7 +226,8 @@ async function speakSegments(segments, initialVoice) {
         };
         current.audio.play();
       });
-      if (i < segments.length) nextPromise = generateAudio(segments[i++], currentVoice);
+      if (i < segments.length)
+        nextPromise = generateAudio(segments[i++], currentVoice);
       else nextPromise = null;
       await playPromise;
     }
@@ -322,9 +345,13 @@ async function exportAllMp3() {
 // ----------------------------------------------
 function stopAll() {
   stopRequested = true;
+  // Abort all active fetches
+  activeControllers.forEach(c => { try { c.abort(); } catch {} });
+  activeControllers = [];
+  // Stop all playing audio
   activeAudios.forEach(a => { try { a.pause(); a.currentTime = 0; } catch {} });
   activeAudios = [];
-  output("⏹️ Force stopped all audio.");
+  output("⏹️ Force-stopped all generation and playback.");
 }
 </script>
 
