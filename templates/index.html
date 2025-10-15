@@ -22,6 +22,7 @@
     <button onclick="addBlock()">➕ Add Block</button>
     <button onclick="speakAll()">▶️ Speak All</button>
     <button onclick="stopAll()">⏹️ Stop</button>
+	<button onclick="exportScript()">📝 Export Script</button>
     <button onclick="exportAllMp3()">🎧 Export All to MP3</button>
   </div>
 
@@ -78,11 +79,22 @@ function addBlock(text = "", voice = "en-US-AriaNeural") {
     <select class="voiceSelect"></select>
     <button class="speakBtn" onclick="speakBlock(this)">▶️ Speak</button>
     <button onclick="exportBlock(this)">💾 To MP3</button>
+	<button onclick="removeBlock(this)">🗑️ Remove</button>
     <textarea placeholder="Enter text...">${text}</textarea>
   `;
   document.getElementById("container").appendChild(div);
   fillLangDropdown(div.querySelector(".langSelect"), div.querySelector(".voiceSelect"), voice);
 }
+
+// ----------------------------------------------
+// 🗑️ Remove a block
+// ----------------------------------------------
+function removeBlock(btn) {
+  const block = btn.parentElement;
+  block.remove();
+  output("🗑️ Block removed.");
+}
+
 
 // Fill dropdowns
 function fillLangDropdown(langSelect, voiceSelect, selectedVoice) {
@@ -339,6 +351,38 @@ async function exportAllMp3() {
   } else output("⚠️ Export did not complete successfully.");
   bar.style.display = "none";
 }
+
+// ----------------------------------------------
+// 📝 Export all text blocks to TXT file
+// ----------------------------------------------
+function exportScript() {
+  const blocks = [...document.querySelectorAll(".block")];
+  if (!blocks.length) return alert("No blocks to export.");
+
+  const parts = blocks.map(b => {
+    const text = b.querySelector("textarea").value.trim();
+    const voice = b.querySelector(".voiceSelect").value;
+    if (!text) return "";
+
+    // Add [voice id] tag if missing
+    if (!/\[voice\s+[^\]]+\]/i.test(text)) {
+      return `[voice ${voice}]:\n${text}`;
+    }
+    return text;
+  }).filter(t => t);
+
+  if (!parts.length) return alert("No text found.");
+
+  const content = parts.join("\n\n");
+  const blob = new Blob([content], { type: "text/plain" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "script.txt";
+  a.click();
+  try { URL.revokeObjectURL(a.href); } catch {}
+  output("📝 Script exported to script.txt");
+}
+
 
 // ----------------------------------------------
 // ⏹️ Stop everything immediately
