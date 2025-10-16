@@ -54,14 +54,16 @@ async function loadVoices() {
     const data = await res.json();
     const grouped = {};
     for (const v of data) {
-      const prefix = v.split("-")[0];
-      grouped[prefix] ||= [];
+      // prefer language-region like "en-US" where available
+      const parts = v.split("-");
+      const prefix = parts.length >= 2 ? parts.slice(0, 2).join("-") : parts[0];
+      if (!grouped[prefix]) grouped[prefix] = [];
       grouped[prefix].push(v);
     }
     voices = grouped;
   } catch (e) {
     console.error("Failed to load voices:", e);
-    voices = { en: ["en-US-AriaNeural", "en-US-GuyNeural"] };
+    voices = { "en-US": ["en-US-AriaNeural", "en-US-GuyNeural"] };
   }
 }
 
@@ -77,18 +79,57 @@ window.addEventListener("DOMContentLoaded", init);
 function addBlock(text = "", voice = "en-US-AriaNeural") {
   const div = document.createElement("div");
   div.className = "block";
-  div.innerHTML = `
-    <label>Lang:</label>
-    <select class="langSelect"></select>
-    <label>Voice:</label>
-    <select class="voiceSelect"></select>
-    <button class="speakBtn" onclick="speakBlock(this)">▶️ Speak</button>
-    <button onclick="exportBlock(this)">💾 To MP3</button>
-	<button onclick="removeBlock(this)">🗑️ Remove</button>
-    <textarea placeholder="Enter text...">${text}</textarea>
-  `;
+
+  // unique ids for accessibility
+  const uid = "blk-" + Date.now() + "-" + Math.floor(Math.random() * 1000);
+
+  const langLabel = document.createElement("label");
+  langLabel.textContent = "Lang:";
+  const langSelect = document.createElement("select");
+  langSelect.className = "langSelect";
+  langSelect.id = uid + "-lang";
+  langLabel.htmlFor = langSelect.id;
+
+  const voiceLabel = document.createElement("label");
+  voiceLabel.textContent = "Voice:";
+  const voiceSelect = document.createElement("select");
+  voiceSelect.className = "voiceSelect";
+  voiceSelect.id = uid + "-voice";
+  voiceLabel.htmlFor = voiceSelect.id;
+
+  const speakBtn = document.createElement("button");
+  speakBtn.type = "button";
+  speakBtn.className = "speakBtn";
+  speakBtn.textContent = "▶️ Speak";
+  speakBtn.addEventListener("click", () => speakBlock(speakBtn));
+
+  const exportBtn = document.createElement("button");
+  exportBtn.type = "button";
+  exportBtn.textContent = "💾 To MP3";
+  exportBtn.addEventListener("click", () => exportBlock(exportBtn));
+
+  const removeBtn = document.createElement("button");
+  removeBtn.type = "button";
+  removeBtn.textContent = "🗑️ Remove";
+  removeBtn.addEventListener("click", () => removeBlock(removeBtn));
+
+  const textarea = document.createElement("textarea");
+  textarea.placeholder = "Enter text...";
+  textarea.value = text;
+
+  // append elements (keeps DOM clean and safe)
+  div.appendChild(langLabel);
+  div.appendChild(langSelect);
+  div.appendChild(voiceLabel);
+  div.appendChild(voiceSelect);
+  div.appendChild(speakBtn);
+  div.appendChild(exportBtn);
+  div.appendChild(removeBtn);
+  div.appendChild(textarea);
+
   document.getElementById("container").appendChild(div);
-  fillLangDropdown(div.querySelector(".langSelect"), div.querySelector(".voiceSelect"), voice);
+
+  fillLangDropdown(langSelect, voiceSelect, voice);
 }
 
 // ----------------------------------------------
@@ -104,13 +145,23 @@ function removeBlock(btn) {
 // Fill dropdowns
 function fillLangDropdown(langSelect, voiceSelect, selectedVoice) {
   langSelect.innerHTML = "";
-  for (const lang of Object.keys(voices).sort()) {
+  const keys = Object.keys(voices).sort();
+  for (const lang of keys) {
     const opt = document.createElement("option");
     opt.value = lang;
     opt.textContent = lang;
     langSelect.appendChild(opt);
   }
-  langSelect.value = selectedVoice.split("-")[0] || Object.keys(voices)[0];
+  // derive lang from selectedVoice (prefer "en-US" from "en-US-VoiceName")
+  if (selectedVoice) {
+    try {
+      langSelect.value = selectedVoice.split("-").slice(0, 2).join("-") || keys[0];
+    } catch {
+      langSelect.value = keys[0];
+    }
+  } else {
+    langSelect.value = keys[0];
+  }
   fillVoiceDropdown(langSelect, voiceSelect, selectedVoice);
   langSelect.addEventListener("change", () => fillVoiceDropdown(langSelect, voiceSelect));
 }
@@ -172,9 +223,10 @@ async function speakSegments(segments, initialVoice) {
 
     async function generateAudio(seg, voice) {
       if (stopRequested) return null;
+      // Do NOT await pauses here — return a pause object so the main loop
+      // can perform the wait at the correct point in the timeline.
       if (seg.type === "pause") {
-        await new Promise(r => setTimeout(r, seg.duration * 1000));
-        return null;
+        return { type: "pause", duration: seg.duration };
       }
       if (seg.type === "voice") return { type: "voice", name: seg.name };
       if (seg.type === "text") {
@@ -229,6 +281,17 @@ async function speakSegments(segments, initialVoice) {
       if (current.type === "voice") {
         currentVoice = current.name;
         output("🎙️ Voice change → " + currentVoice);
+        if (i < segments.length)
+          nextPromise = generateAudio(segments[i++], currentVoice);
+        continue;
+      }
+      if (current.type === "pause") {
+        output("⏸️ Pause " + current.duration + "s");
+        // Wait here so pause occurs after previous audio finished.
+        const end = Date.now() + current.duration * 1000;
+        while (!stopRequested && Date.now() < end) {
+          await new Promise(r => setTimeout(r, 50));
+        }
         if (i < segments.length)
           nextPromise = generateAudio(segments[i++], currentVoice);
         continue;
