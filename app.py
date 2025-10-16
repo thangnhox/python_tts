@@ -268,7 +268,19 @@ def progress(job_id):
 # Startup
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run TTS Flask server")
+    parser.add_argument("--host", default=os.environ.get("TTS_HOST", "0.0.0.0"),
+                        help="Host to bind (env: TTS_HOST)")
+    parser.add_argument("--port", type=int, default=int(os.environ.get("TTS_PORT", 8000)),
+                        help="Port to bind (env: TTS_PORT)")
+    parser.add_argument("--debug", action="store_true",
+                        default=os.environ.get("TTS_DEBUG", "") in ("1", "true", "True"),
+                        help="Enable Flask debug mode (env: TTS_DEBUG=1)")
+    args = parser.parse_args()
+
     init_db()
     db_cleanup()
-    app.run(debug=True, host='0.0.0.0', port=8000)
+    app.run(debug=args.debug, host=args.host, port=args.port)
 

@@ -12,6 +12,11 @@
   select { padding: .3em; font-size: 14px; border-radius: 6px; }
   #output { margin-top: 1em; padding: 1em; background: #fff; border-radius: 8px; font-family: monospace; white-space: pre-wrap; }
   #progressBar { width: 100%; height: 14px; display:none; margin-top:.5em; }
+
+  /* Disabled speak buttons should look grey while generating/speaking */
+  button:disabled { background: #cfcfcf; color: #666; cursor: default; }
+  /* slightly stronger styling for primary-looking buttons when disabled */
+  .speakBtn:disabled, #speakAllBtn:disabled { background: #bfbfbf; color: #555; }
 </style>
 </head>
 <body>
@@ -20,9 +25,9 @@
 
   <div style="margin-top:1em;">
     <button onclick="addBlock()">➕ Add Block</button>
-    <button onclick="speakAll()">▶️ Speak All</button>
+    <button id="speakAllBtn" onclick="speakAll()">▶️ Speak All</button>
     <button onclick="stopAll()">⏹️ Stop</button>
-	<button onclick="exportScript()">📝 Export Script</button>
+    <button onclick="exportScript()">📝 Export Script</button>
     <button onclick="exportAllMp3()">🎧 Export All to MP3</button>
   </div>
 
@@ -149,102 +154,113 @@ function parseSegments(text, defaultVoice) {
   return segments;
 }
 
+// Disable/enable all speak buttons (per-block and the top "Speak All")
+function setSpeakButtonsDisabled(disabled) {
+  const btns = document.querySelectorAll(".speakBtn, #speakAllBtn");
+  btns.forEach(b => { try { b.disabled = disabled; } catch {} });
+}
+
 // ----------------------------------------------
 // Core speaking logic shared by both functions
 // ----------------------------------------------
 async function speakSegments(segments, initialVoice) {
-  let currentVoice = initialVoice;
-  let nextPromise = null;
-  let i = 0;
+  setSpeakButtonsDisabled(true);
+  try {
+    let currentVoice = initialVoice;
+    let nextPromise = null;
+    let i = 0;
 
-  async function generateAudio(seg, voice) {
-    if (stopRequested) return null;
-    if (seg.type === "pause") {
-      await new Promise(r => setTimeout(r, seg.duration * 1000));
+    async function generateAudio(seg, voice) {
+      if (stopRequested) return null;
+      if (seg.type === "pause") {
+        await new Promise(r => setTimeout(r, seg.duration * 1000));
+        return null;
+      }
+      if (seg.type === "voice") return { type: "voice", name: seg.name };
+      if (seg.type === "text") {
+        const text = seg.content.trim();
+        if (!text) return null;
+
+        // 👇 Create abortable fetch
+        const controller = new AbortController();
+        activeControllers.push(controller);
+
+        try {
+          const res = await fetch("/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text, voice }),
+            signal: controller.signal
+          });
+          if (!res.ok) return null;
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          return { type: "audio", audio, voice, url };
+        } catch (err) {
+          if (err.name === "AbortError") {
+            console.log("⏹️ Fetch aborted:", text);
+            return null;
+          }
+          console.error("Fetch failed:", err);
+          return null;
+        } finally {
+          activeControllers = activeControllers.filter(c => c !== controller);
+        }
+      }
       return null;
     }
-    if (seg.type === "voice") return { type: "voice", name: seg.name };
-    if (seg.type === "text") {
-      const text = seg.content.trim();
-      if (!text) return null;
 
-      // 👇 Create abortable fetch
-      const controller = new AbortController();
-      activeControllers.push(controller);
+    while (i < segments.length && (!nextPromise || (await nextPromise) === null))
+      nextPromise = generateAudio(segments[i++], currentVoice);
 
-      try {
-        const res = await fetch("/tts", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, voice }),
-          signal: controller.signal
+    while (true) {
+      if (stopRequested) break;
+      if (!nextPromise) break;
+      const current = await nextPromise;
+      nextPromise = null;
+
+      if (!current) {
+        if (i >= segments.length) break;
+        nextPromise = generateAudio(segments[i++], currentVoice);
+        continue;
+      }
+
+      if (current.type === "voice") {
+        currentVoice = current.name;
+        output("🎙️ Voice change → " + currentVoice);
+        if (i < segments.length)
+          nextPromise = generateAudio(segments[i++], currentVoice);
+        continue;
+      }
+
+      if (current.type === "audio") {
+        output("🔊 Speaking (" + current.voice + ")");
+        const url = current.url;
+        activeAudios.push(current.audio);
+        const playPromise = new Promise(resolve => {
+          current.audio.onended = () => {
+            try { URL.revokeObjectURL(url); } catch {}
+            activeAudios = activeAudios.filter(a => a !== current.audio);
+            resolve();
+          };
+          current.audio.onerror = () => {
+            try { URL.revokeObjectURL(url); } catch {}
+            activeAudios = activeAudios.filter(a => a !== current.audio);
+            resolve();
+          };
+          current.audio.play();
         });
-        if (!res.ok) return null;
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        return { type: "audio", audio, voice, url };
-      } catch (err) {
-        if (err.name === "AbortError") {
-          console.log("⏹️ Fetch aborted:", text);
-          return null;
-        }
-        console.error("Fetch failed:", err);
-        return null;
-      } finally {
-        activeControllers = activeControllers.filter(c => c !== controller);
+        if (i < segments.length)
+          nextPromise = generateAudio(segments[i++], currentVoice);
+        else nextPromise = null;
+        await playPromise;
       }
     }
-    return null;
-  }
-
-  while (i < segments.length && (!nextPromise || (await nextPromise) === null))
-    nextPromise = generateAudio(segments[i++], currentVoice);
-
-  while (true) {
-    if (stopRequested) break;
-    if (!nextPromise) break;
-    const current = await nextPromise;
     nextPromise = null;
-
-    if (!current) {
-      if (i >= segments.length) break;
-      nextPromise = generateAudio(segments[i++], currentVoice);
-      continue;
-    }
-
-    if (current.type === "voice") {
-      currentVoice = current.name;
-      output("🎙️ Voice change → " + currentVoice);
-      if (i < segments.length)
-        nextPromise = generateAudio(segments[i++], currentVoice);
-      continue;
-    }
-
-    if (current.type === "audio") {
-      output("🔊 Speaking (" + current.voice + ")");
-      const url = current.url;
-      activeAudios.push(current.audio);
-      const playPromise = new Promise(resolve => {
-        current.audio.onended = () => {
-          try { URL.revokeObjectURL(url); } catch {}
-          activeAudios = activeAudios.filter(a => a !== current.audio);
-          resolve();
-        };
-        current.audio.onerror = () => {
-          try { URL.revokeObjectURL(url); } catch {}
-          activeAudios = activeAudios.filter(a => a !== current.audio);
-          resolve();
-        };
-        current.audio.play();
-      });
-      if (i < segments.length)
-        nextPromise = generateAudio(segments[i++], currentVoice);
-      else nextPromise = null;
-      await playPromise;
-    }
+  } finally {
+    setSpeakButtonsDisabled(false);
   }
-  nextPromise = null;
 }
 
 // ----------------------------------------------
@@ -293,19 +309,25 @@ async function exportBlock(btn) {
   const voice = block.querySelector(".voiceSelect").value;
   if (!text) return alert("No text.");
   output(`🎧 Generating MP3 for ${voice}...`);
-  const res = await fetch("/tts", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, voice })
-  });
-  if (!res.ok) return alert("Error generating audio.");
-  const blob = await res.blob();
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${voice}.mp3`;
-  a.click();
-  try { URL.revokeObjectURL(a.href); } catch {}
-  output(`💾 Downloaded ${voice}.mp3`);
+
+  try {
+    const res = await fetch("/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voice })
+    });
+    if (!res.ok) return alert("Error generating audio.");
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${voice}.mp3`;
+    a.click();
+    try { URL.revokeObjectURL(a.href); } catch {}
+    output(`💾 Downloaded ${voice}.mp3`);
+  } catch (err) {
+    console.error("Export failed:", err);
+    alert("Error generating audio.");
+  }
 }
 
 // ----------------------------------------------
@@ -323,33 +345,39 @@ async function exportAllMp3() {
   bar.style.display = "block";
   bar.value = 0;
 
-  const startRes = await fetch("/tts-all", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ blocks })
-  });
-  if (!startRes.ok) { bar.style.display = "none"; return alert("Failed to start export."); }
-  const startData = await startRes.json();
-  const jobId = startData.job_id;
-  const downloadPath = startData.download;
+  try {
+    const startRes = await fetch("/tts-all", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ blocks })
+    });
+    if (!startRes.ok) { bar.style.display = "none"; return alert("Failed to start export."); }
+    const startData = await startRes.json();
+    const jobId = startData.job_id;
+    const downloadPath = startData.download;
 
-  let done = false;
-  while (!done) {
-    await new Promise(r => setTimeout(r, 1500));
-    try {
-      const p = await fetch(`/progress/${jobId}`).then(r => r.json());
-      if (p.error) { output("Export error"); break; }
-      output(`${p.progress}% — ${p.status}`);
-      bar.value = p.progress;
-      if (p.status === "Complete" || p.progress >= 100) done = true;
-    } catch (err) { console.error("progress poll error:", err); break; }
+    let done = false;
+    while (!done) {
+      await new Promise(r => setTimeout(r, 1500));
+      try {
+        const p = await fetch(`/progress/${jobId}`).then(r => r.json());
+        if (p.error) { output("Export error"); break; }
+        output(`${p.progress}% — ${p.status}`);
+        bar.value = p.progress;
+        if (p.status === "Complete" || p.progress >= 100) done = true;
+      } catch (err) { console.error("progress poll error:", err); break; }
+    }
+
+    if (done) {
+      window.location.href = downloadPath;
+      output("✅ Combined MP3 download started.");
+    } else output("⚠️ Export did not complete successfully.");
+  } catch (err) {
+    console.error("Export all failed:", err);
+    alert("Export failed.");
+  } finally {
+    bar.style.display = "none";
   }
-
-  if (done) {
-    window.location.href = downloadPath;
-    output("✅ Combined MP3 download started.");
-  } else output("⚠️ Export did not complete successfully.");
-  bar.style.display = "none";
 }
 
 // ----------------------------------------------
@@ -395,6 +423,8 @@ function stopAll() {
   // Stop all playing audio
   activeAudios.forEach(a => { try { a.pause(); a.currentTime = 0; } catch {} });
   activeAudios = [];
+  // Re-enable speak buttons immediately when user presses Stop
+  setSpeakButtonsDisabled(false);
   output("⏹️ Force-stopped all generation and playback.");
 }
 </script>
